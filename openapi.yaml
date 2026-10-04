@@ -1,0 +1,1540 @@
+openapi: 3.1.0
+info:
+  title: Library API
+  version: 1.0.0
+  description: 'Учебный contract-first API библиотеки. Все бизнес-даты определяются по UTC; timestamps выдаются
+    в RFC 3339 с Z. Все запросы/ответы с телом — application/json. JSON-поля — snake_case, пути и query-параметры
+    — kebab-case; ID — UUID.
+
+    Серверные поля исключены из request-схем; additionalProperties: false запрещает неизвестные поля. readOnly в
+    response — дополнительная аннотация, а не единственный механизм запрета записи. Межполевые и динамические правила
+    проверяет сервер.
+
+    Единый ErrorResponse: 400 INVALID_REQUEST; 404 NOT_FOUND; 422 VALIDATION_ERROR; 409 CONFLICT, BUSINESS_RULE_VIOLATION
+    либо IDEMPOTENCY_MISMATCH. Запросы с неподдерживаемым Content-Type: 415 INVALID_REQUEST. Неописанные методы
+    маршрутов: 405 INVALID_REQUEST с Allow. 500/503 от инфраструктуры за пределами учебного прикладного контракта;
+    политика повтора таких ответов не гарантируется.
+
+    В учебном API авторизация не заявлена; для production требуется отдельный security-контракт. Бонусное задание
+    — таблица совместимости v2 в README.md.'
+servers:
+- url: http://localhost:4010/v1/
+  description: Локальный адрес реализации или mock; сервер не запущен автоматически.
+tags:
+- name: Books
+  description: Книги и фонд экземпляров.
+- name: Readers
+  description: Регистрация и данные читателей.
+- name: Loans
+  description: Выдачи, история и возвраты.
+paths:
+  /books:
+    get:
+      tags:
+      - Books
+      operationId: listBooks
+      summary: Получить список книг
+      description: Неизвестные, повторяющиеся и некорректные query-параметры дают 400 INVALID_REQUEST. Фильтры объединяются
+        через AND. Сначала фильтрация, затем стабильная сортировка, затем limit/offset. data и pagination рассчитаны
+        в одном согласованном снимке; отдельные запросы страниц не образуют общий снимок при параллельных изменениях.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookListResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Offset'
+      - name: q
+        in: query
+        description: Регистронезависимый поиск подстроки в title ИЛИ author; пробелы по краям запроса игнорируются,
+          строка только из пробелов недопустима.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: \S
+          description: Поисковая строка.
+      - name: author
+        in: query
+        description: Регистронезависимое полное совпадение автора.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Автор.
+      - name: isbn
+        in: query
+        description: Полное совпадение ISBN-13. Проверка формата; фильтр не изменяет данные.
+        schema:
+          type: string
+          pattern: ^[0-9]{13}$
+      - name: published-year
+        in: query
+        description: Точный год публикации.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 9999
+      - name: available
+        in: query
+        description: true — available_copies > 0; false — available_copies = 0. Только литералы true/false.
+        schema:
+          type: boolean
+      - name: sort
+        in: query
+        description: Одно поле; префикс - означает убывание, без префикса — возрастание. При равенстве основного
+          поля всегда вторичная сортировка по id ASC. Kebab-case токены отображаются на snake_case поля JSON.
+        schema:
+          type: string
+          enum:
+          - title
+          - -title
+          - author
+          - -author
+          - published-year
+          - -published-year
+          - total-copies
+          - -total-copies
+          - available-copies
+          - -available-copies
+          - id
+          - -id
+          default: title
+    post:
+      tags:
+      - Books
+      operationId: createBook
+      summary: Создать книгу
+      description: ISBN уникален среди неудалённых книг; его контрольная сумма проверяется на сервере. available_copies
+        новой книги равен total_copies. id задаёт сервер.
+      responses:
+        '201':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: URI созданного ресурса, например /v1/books/11111111-1111-4111-8111-111111111111.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+              examples:
+                BookCreated:
+                  $ref: '#/components/examples/BookCreated'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      requestBody:
+        required: true
+        description: JSON-объект. Неизвестные поля запрещены; серверные поля не принимаются.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBookRequest'
+            example: &id001
+              title: Мастер и Маргарита
+              author: Михаил Булгаков
+              isbn: '9780141180144'
+              published_year: 1967
+              total_copies: 3
+  /books/{id}:
+    parameters:
+    - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags:
+      - Books
+      operationId: getBook
+      summary: Получить книгу
+      description: Возвращает неудалённую книгу и актуальное вычисленное available_copies.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+              examples:
+                BookCreated:
+                  $ref: '#/components/examples/BookCreated'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+      - Books
+      operationId: replaceBook
+      summary: Полностью заменить данные книги
+      description: Требуются все изменяемые поля; id и available_copies не принимаются и не изменяются непосредственно.
+        Несуществующий id — 404, PUT не создаёт ресурс. Изменение total_copies и проверка активных выдач атомарны.
+        Дубликат ISBN — 409 CONFLICT; total_copies ниже активных выдач — 409 BUSINESS_RULE_VIOLATION.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      requestBody:
+        required: true
+        description: JSON-объект. Неизвестные поля запрещены; серверные поля не принимаются.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceBookRequest'
+            example: *id001
+    patch:
+      tags:
+      - Books
+      operationId: updateBook
+      summary: Частично изменить книгу
+      description: 'Принимается непустой JSON-объект с подмножеством изменяемых полей; отсутствующие поля сохраняются.
+        Это не JSON Patch и не JSON Merge Patch: null запрещён для всех полей. Обновление и проверка активных выдач
+        атомарны. Конфликты те же, что у PUT. Для конкурирующих обычных обновлений действует last-write-wins.'
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      requestBody:
+        required: true
+        description: JSON-объект. Неизвестные поля запрещены; серверные поля не принимаются.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBookRequest'
+            example:
+              total_copies: 5
+    delete:
+      tags:
+      - Books
+      operationId: deleteBook
+      summary: Удалить книгу
+      description: При активных выдачах — 409 BUSINESS_RULE_VIOLATION, issue=active_loans_exist. Проверка и логическое
+        удаление атомарны с выдачей и возвратом. После удаления ресурс не виден в Books, GET/PUT/PATCH/повторный
+        DELETE дают 404. Исторические Loan и их book_id сохраняются; ISBN освобождается. 204 без тела.
+      responses:
+        '204':
+          description: Удалено. Тело ответа отсутствует.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /readers:
+    get:
+      tags:
+      - Readers
+      operationId: listReaders
+      summary: Получить список читателей
+      description: Неизвестные, повторяющиеся и некорректные query-параметры дают 400 INVALID_REQUEST. Фильтры объединяются
+        через AND. Сначала фильтрация, затем стабильная сортировка, затем limit/offset. data и pagination рассчитаны
+        в одном согласованном снимке; отдельные запросы страниц не образуют общий снимок при параллельных изменениях.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReaderListResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Offset'
+      - name: q
+        in: query
+        description: Регистронезависимый поиск подстроки в full_name ИЛИ email; пробельная строка недопустима.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: \S
+          description: Поисковая строка.
+      - name: email
+        in: query
+        description: Полное совпадение email без учёта регистра.
+        schema:
+          type: string
+          format: email
+          maxLength: 254
+      - name: registered-from
+        in: query
+        description: Включительная нижняя граница registered_at; RFC 3339.
+        schema:
+          type: string
+          format: date-time
+      - name: registered-to
+        in: query
+        description: Включительная верхняя граница registered_at. registered-from <= registered-to, иначе 400.
+        schema:
+          type: string
+          format: date-time
+      - name: sort
+        in: query
+        description: Одно поле; префикс - означает убывание, без префикса — возрастание. При равенстве основного
+          поля всегда вторичная сортировка по id ASC. Kebab-case токены отображаются на snake_case поля JSON.
+        schema:
+          type: string
+          enum:
+          - full-name
+          - -full-name
+          - email
+          - -email
+          - registered-at
+          - -registered-at
+          - id
+          - -id
+          default: full-name
+    post:
+      tags:
+      - Readers
+      operationId: createReader
+      summary: Зарегистрировать читателя
+      description: id и registered_at задаёт сервер. Email уникален среди неудалённых читателей без учёта регистра;
+        дубликат — 409 CONFLICT.
+      responses:
+        '201':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: URI созданного ресурса, например /v1/readers/22222222-2222-4222-8222-222222222222.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reader'
+              examples:
+                ReaderCreated:
+                  $ref: '#/components/examples/ReaderCreated'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      requestBody:
+        required: true
+        description: JSON-объект. Неизвестные поля запрещены; серверные поля не принимаются.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReaderRequest'
+            example: &id002
+              full_name: Анна Иванова
+              email: anna@example.com
+  /readers/{id}:
+    parameters:
+    - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags:
+      - Readers
+      operationId: getReader
+      summary: Получить читателя
+      description: Возвращает неудалённого читателя.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reader'
+              examples:
+                ReaderCreated:
+                  $ref: '#/components/examples/ReaderCreated'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+      - Readers
+      operationId: replaceReader
+      summary: Полностью заменить данные читателя
+      description: Требуются full_name и email. id и registered_at сохраняются; серверные поля запрещены в запросе.
+        PUT не создаёт ресурс. Дубликат email — 409 CONFLICT.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reader'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      requestBody:
+        required: true
+        description: JSON-объект. Неизвестные поля запрещены; серверные поля не принимаются.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceReaderRequest'
+            example: *id002
+    patch:
+      tags:
+      - Readers
+      operationId: updateReader
+      summary: Частично изменить читателя
+      description: Непустой JSON-объект; отсутствующие поля сохраняются, null запрещён. Это обычный JSON, не JSON
+        Patch/Merge Patch. id и registered_at не меняются. Дубликат email — 409 CONFLICT. Для конкурирующих обычных
+        обновлений действует last-write-wins.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reader'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      requestBody:
+        required: true
+        description: JSON-объект. Неизвестные поля запрещены; серверные поля не принимаются.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateReaderRequest'
+            example:
+              email: new-address@example.com
+    delete:
+      tags:
+      - Readers
+      operationId: deleteReader
+      summary: Удалить читателя
+      description: При активных выдачах — 409 BUSINESS_RULE_VIOLATION, issue=active_loans_exist. Проверка и логическое
+        удаление атомарны с выдачей и возвратом. Читатель исчезает из Readers; повторный DELETE и GET/PUT/PATCH
+        дают 404. Исторические Loan и reader_id сохраняются; email освобождается. 204 без тела.
+      responses:
+        '204':
+          description: Удалено. Тело ответа отсутствует.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /loans:
+    get:
+      tags:
+      - Loans
+      operationId: listLoans
+      summary: Получить список выдач
+      description: Неизвестные, повторяющиеся и некорректные query-параметры дают 400 INVALID_REQUEST. Фильтры объединяются
+        через AND. Сначала фильтрация, затем стабильная сортировка, затем limit/offset. data и pagination рассчитаны
+        в одном согласованном снимке; отдельные запросы страниц не образуют общий снимок при параллельных изменениях.
+        Текущая дата UTC фиксируется один раз на запрос. status=overdue означает returned_at = null и due_date <
+        эта дата. Выдача со сроком сегодня ещё не просрочена. Возвращённые выдачи не просрочены, даже если возврат
+        был поздним.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoanListResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Offset'
+      - name: status
+        in: query
+        description: 'active: returned_at = null, включая просроченные; returned: returned_at != null; overdue:
+          returned_at = null AND due_date < текущая дата UTC. Без фильтра — все выдачи.'
+        schema:
+          type: string
+          enum:
+          - active
+          - returned
+          - overdue
+      - name: book-id
+        in: query
+        description: Выдачи указанной книги, включая исторические выдачи логически удалённой книги. Отсутствующий
+          ID даёт пустой список, не 404.
+        schema:
+          type: string
+          format: uuid
+          description: ID книги.
+      - name: reader-id
+        in: query
+        description: Выдачи указанного читателя, включая исторические выдачи логически удалённого читателя. Отсутствующий
+          ID даёт пустой список.
+        schema:
+          type: string
+          format: uuid
+          description: ID читателя.
+      - name: due-from
+        in: query
+        description: Включительная нижняя граница due_date.
+        schema:
+          type: string
+          format: date
+      - name: due-to
+        in: query
+        description: Включительная верхняя граница due_date. due-from <= due-to, иначе 400.
+        schema:
+          type: string
+          format: date
+      - name: sort
+        in: query
+        description: Одно поле; префикс - означает убывание, без префикса — возрастание. При равенстве основного
+          поля всегда вторичная сортировка по id ASC. Kebab-case токены отображаются на snake_case поля JSON.
+        schema:
+          type: string
+          enum:
+          - loaned-at
+          - -loaned-at
+          - due-date
+          - -due-date
+          - id
+          - -id
+          default: -loaned-at
+    post:
+      tags:
+      - Loans
+      operationId: createLoan
+      summary: Выдать книгу читателю
+      description: 'Создаёт выдачу. Сервер устанавливает id, loaned_at и returned_at = null. Книга и читатель должны
+        существовать и не быть удалены (404). Дата due_date строго позже текущей даты UTC (422 VALIDATION_ERROR).
+        Для существующего сохранённого ключа сначала проверяется fingerprint/replay, а не текущая дата или доступность:
+        ранее успешный ответ не превращается в ошибку после изменения состояния.
+
+
+        Бизнес-правила: available_copies > 0; у читателя не более 5 активных выдач после создания. Активная выдача
+        — returned_at = null, включая просроченные. Нарушения — 409 BUSINESS_RULE_VIOLATION с issue=no_available_copies
+        либо active_loans_limit. Приоритет при одновременных нарушениях: отсутствие книги, отсутствие читателя,
+        неверная due_date, нет экземпляров, лимит читателя. Проверки и запись выполняются в одной атомарной транзакции
+        с сериализацией по книге и читателю, чтобы конкурентные запросы с разными ключами не обходили лимиты.
+
+
+        Политика Idempotency-Key:
+
+        1. Заголовок обязателен; UUID без кавычек. Область ключа в этом учебном API без авторизации: HTTP-метод
+        POST + нормализованный путь /v1/loans + UUID ключа (регистр UUID незначим). Глобальная область между клиентами;
+        при будущей авторизации потребуется отдельный контракт scope по субъекту.
+
+        2. Fingerprint — SHA-256 канонического UTF-8 JSON тела: ключи объектов сортируются, незначащие пробелы удаляются,
+        Unicode не нормализуется, имена и значения не меняются. Регистр UUID в теле значим для fingerprint. Повторяющиеся
+        JSON-ключи запрещены (400). Порядок полей и JSON-escape представление одного символа не меняют fingerprint.
+
+        3. Сначала проверяются Content-Type, синтаксис, обязательный заголовок и статическая схема. Ошибки 400/415/422
+        этого этапа ключ не резервируют. После этого атомарно ищется/резервируется ключ и сравнивается fingerprint;
+        динамические проверки due_date и бизнес-правил выполняются только для нового ключа.
+
+        4. Завершённый запрос с тем же ключом и fingerprint: полный replay сохранённого HTTP-статуса, байтов тела
+        и всех исходных HTTP-заголовков ответа, включая Content-Type, Location при 201, X-Request-Id и Date, если
+        он был установлен. Повтор не обновляет loaned_at, не создаёт выдачу и не пересчитывает ответ. Транспортное
+        фреймирование не является частью replay. В теле ошибки сохраняется исходный request_id. Дополнительный replay-заголовок
+        не добавляется.
+
+        5. То же ключевое значение с другим валидным телом: 409 IDEMPOTENCY_MISMATCH независимо от того, завершён
+        исходный запрос или ещё выполняется. Исходная запись не меняется.
+
+        6. Конкурентный повтор с тем же fingerprint, пока исходный запрос обрабатывается: 409 CONFLICT, details.issue=idempotency_in_progress,
+        Retry-After: 1. Повтор не запускает выдачу. После завершения исходного запроса клиент с тем же ключом получает
+        replay. Mismatch и конкурентная ошибка не заменяют сохранённый исходный результат.
+
+        7. Завершённый результат хранится ровно 24 часа с момента атомарной фиксации результата (UTC), без продления
+        при повторах. На границе completed_at + 24h запись считается истёкшей; повтор становится новым запросом,
+        может создать ещё одну выдачу и заново проходит бизнес-проверки. Клиент не должен использовать истёкший
+        ключ для безопасного повтора.
+
+        8. Сохраняются 201 и завершённые прикладные 404/409/422 после резервирования ключа. Создание Loan и фиксация
+        результата идемпотентности атомарны. Запись in-progress не удаляется по TTL завершённых ответов: сбой исполнителя
+        требует восстановления с проверкой зафиксированной транзакции, а не повторной выдачи вслепую. До восстановления
+        повторы получают 409 in-progress.
+
+
+        Ключи следует генерировать случайно и не повторять для новых логических операций. Idempotency-Key не заменяет
+        транзакционные проверки бизнес-ограничений.'
+      responses:
+        '201':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: URI созданного ресурса, например /v1/loans/33333333-3333-4333-8333-333333333333.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+              examples:
+                LoanCreated:
+                  $ref: '#/components/examples/LoanCreated'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: JSON-объект. Неизвестные поля запрещены; серверные поля не принимаются.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLoanRequest'
+            example: &id003
+              book_id: 11111111-1111-4111-8111-111111111111
+              reader_id: 22222222-2222-4222-8222-222222222222
+              due_date: '2030-01-24'
+  /loans/{id}:
+    parameters:
+    - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags:
+      - Loans
+      operationId: getLoan
+      summary: Получить выдачу
+      description: Возвращает активную или возвращённую выдачу. История доступна и после логического удаления книги/читателя.
+        book_id/reader_id в исторических записях не гарантируют доступность соответствующего GET.
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+              examples:
+                LoanCreated:
+                  $ref: '#/components/examples/LoanCreated'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /loans/{id}/return:
+    parameters:
+    - $ref: '#/components/parameters/ResourceId'
+    post:
+      tags:
+      - Loans
+      operationId: returnLoan
+      summary: Вернуть книгу
+      description: 'Тело отсутствует и не должно передаваться; непустое тело — 400 INVALID_REQUEST. Сервер атомарно
+        меняет returned_at с null на текущий момент UTC. Повторный и конкурентный возврат возвращают 200 с тем же
+        исходным returned_at, не 409; число доступных экземпляров увеличивается только один раз за счёт уменьшения
+        числа активных выдач. Допускается возврат просроченной выдачи. Idempotency-Key не требуется: операция идемпотентна
+        по состоянию выдачи. Loan не удаляется; DELETE для Loans не предусмотрен.'
+      responses:
+        '200':
+          description: Операция выполнена.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+              examples:
+                LoanReturned:
+                  $ref: '#/components/examples/LoanReturned'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  schemas:
+    Book:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Серверный ID книги.
+          readOnly: true
+        title:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Название; строка должна содержать хотя бы один непробельный символ.
+        author:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Имя автора или текстовое представление нескольких авторов.
+        isbn:
+          type: string
+          pattern: ^[0-9]{13}$
+          description: ISBN-13 без пробелов и дефисов. Проверяются длина, цифры и контрольная сумма; ISBN уникален
+            среди неудалённых книг.
+        published_year:
+          type: integer
+          minimum: 1
+          maximum: 9999
+          description: Год публикации.
+        total_copies:
+          type: integer
+          minimum: 0
+          description: Общее число экземпляров. Нельзя установить значение меньше количества активных выдач этой
+            книги.
+        available_copies:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: 'Вычисляется сервером: total_copies минус число выдач этой книги с returned_at = null. Клиент
+            не передаёт поле.'
+      required:
+      - id
+      - title
+      - author
+      - isbn
+      - published_year
+      - total_copies
+      - available_copies
+      examples:
+      - &id004
+        id: 11111111-1111-4111-8111-111111111111
+        title: Мастер и Маргарита
+        author: Михаил Булгаков
+        isbn: '9780141180144'
+        published_year: 1967
+        total_copies: 3
+        available_copies: 2
+    Reader:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Серверный ID читателя.
+          readOnly: true
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Полное имя читателя.
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Email. Уникальность среди неудалённых читателей проверяется без учёта регистра; исходное
+            написание сохраняется.
+        registered_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Время регистрации, RFC 3339, UTC (Z); устанавливается сервером.
+      required:
+      - id
+      - full_name
+      - email
+      - registered_at
+      examples:
+      - &id005
+        id: 22222222-2222-4222-8222-222222222222
+        full_name: Анна Иванова
+        email: anna@example.com
+        registered_at: '2030-01-10T09:00:00Z'
+    Loan:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Серверный ID выдачи.
+          readOnly: true
+        book_id:
+          type: string
+          format: uuid
+          description: ID существующей неудалённой книги.
+          readOnly: true
+        reader_id:
+          type: string
+          format: uuid
+          description: ID существующего неудалённого читателя.
+          readOnly: true
+        due_date:
+          type: string
+          format: date
+          description: Последний допустимый день возврата (включительно), по UTC. При создании строго позже текущей
+            даты UTC; динамическая проверка на сервере.
+          readOnly: true
+        loaned_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Время выдачи, UTC (Z), задаётся сервером.
+        returned_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
+          description: null для активной выдачи; время первого возврата в UTC (Z) для возвращённой. В OpenAPI 3.1
+            null включён в type.
+      required:
+      - id
+      - book_id
+      - reader_id
+      - due_date
+      - loaned_at
+      - returned_at
+      examples:
+      - &id006
+        id: 33333333-3333-4333-8333-333333333333
+        book_id: 11111111-1111-4111-8111-111111111111
+        reader_id: 22222222-2222-4222-8222-222222222222
+        loaned_at: '2030-01-10T10:00:00Z'
+        due_date: '2030-01-24'
+        returned_at: null
+      - &id007
+        id: 33333333-3333-4333-8333-333333333333
+        book_id: 11111111-1111-4111-8111-111111111111
+        reader_id: 22222222-2222-4222-8222-222222222222
+        loaned_at: '2030-01-10T10:00:00Z'
+        due_date: '2030-01-24'
+        returned_at: '2030-01-20T12:00:00Z'
+    CreateBookRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Название; строка должна содержать хотя бы один непробельный символ.
+        author:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Имя автора или текстовое представление нескольких авторов.
+        isbn:
+          type: string
+          pattern: ^[0-9]{13}$
+          description: ISBN-13 без пробелов и дефисов. Проверяются длина, цифры и контрольная сумма; ISBN уникален
+            среди неудалённых книг.
+        published_year:
+          type: integer
+          minimum: 1
+          maximum: 9999
+          description: Год публикации.
+        total_copies:
+          type: integer
+          minimum: 0
+          description: Общее число экземпляров. Нельзя установить значение меньше количества активных выдач этой
+            книги.
+      required:
+      - title
+      - author
+      - isbn
+      - published_year
+      - total_copies
+      examples:
+      - *id001
+    ReplaceBookRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Название; строка должна содержать хотя бы один непробельный символ.
+        author:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Имя автора или текстовое представление нескольких авторов.
+        isbn:
+          type: string
+          pattern: ^[0-9]{13}$
+          description: ISBN-13 без пробелов и дефисов. Проверяются длина, цифры и контрольная сумма; ISBN уникален
+            среди неудалённых книг.
+        published_year:
+          type: integer
+          minimum: 1
+          maximum: 9999
+          description: Год публикации.
+        total_copies:
+          type: integer
+          minimum: 0
+          description: Общее число экземпляров. Нельзя установить значение меньше количества активных выдач этой
+            книги.
+      required:
+      - title
+      - author
+      - isbn
+      - published_year
+      - total_copies
+    UpdateBookRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Название; строка должна содержать хотя бы один непробельный символ.
+        author:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Имя автора или текстовое представление нескольких авторов.
+        isbn:
+          type: string
+          pattern: ^[0-9]{13}$
+          description: ISBN-13 без пробелов и дефисов. Проверяются длина, цифры и контрольная сумма; ISBN уникален
+            среди неудалённых книг.
+        published_year:
+          type: integer
+          minimum: 1
+          maximum: 9999
+          description: Год публикации.
+        total_copies:
+          type: integer
+          minimum: 0
+          description: Общее число экземпляров. Нельзя установить значение меньше количества активных выдач этой
+            книги.
+      required: []
+      minProperties: 1
+      examples:
+      - total_copies: 5
+    CreateReaderRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Полное имя читателя.
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Email. Уникальность среди неудалённых читателей проверяется без учёта регистра; исходное
+            написание сохраняется.
+      required:
+      - full_name
+      - email
+      examples:
+      - *id002
+    ReplaceReaderRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Полное имя читателя.
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Email. Уникальность среди неудалённых читателей проверяется без учёта регистра; исходное
+            написание сохраняется.
+      required:
+      - full_name
+      - email
+    UpdateReaderRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 300
+          pattern: \S
+          description: Полное имя читателя.
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Email. Уникальность среди неудалённых читателей проверяется без учёта регистра; исходное
+            написание сохраняется.
+      required: []
+      minProperties: 1
+      examples:
+      - email: new-address@example.com
+    CreateLoanRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        book_id:
+          type: string
+          format: uuid
+          description: ID существующей неудалённой книги.
+        reader_id:
+          type: string
+          format: uuid
+          description: ID существующего неудалённого читателя.
+        due_date:
+          type: string
+          format: date
+          description: Последний допустимый день возврата (включительно), по UTC. При создании строго позже текущей
+            даты UTC; динамическая проверка на сервере.
+      required:
+      - book_id
+      - reader_id
+      - due_date
+      examples:
+      - *id003
+    Pagination:
+      type: object
+      additionalProperties: false
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        total:
+          type: integer
+          minimum: 0
+          description: Число записей после фильтрации до пагинации.
+        has_more:
+          type: boolean
+          description: offset + фактическое количество data < total.
+      required:
+      - limit
+      - offset
+      - total
+      - has_more
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      properties:
+        field:
+          type:
+          - string
+          - 'null'
+          description: Поле JSON/query/header/path; null для ошибки запроса целиком.
+        issue:
+          type: string
+          minLength: 1
+          description: Машиночитаемое уточнение причины, например active_loans_limit.
+        message:
+          type: string
+          minLength: 1
+      required:
+      - field
+      - issue
+      - message
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+              enum:
+              - INVALID_REQUEST
+              - NOT_FOUND
+              - VALIDATION_ERROR
+              - CONFLICT
+              - BUSINESS_RULE_VIOLATION
+              - IDEMPOTENCY_MISMATCH
+            message:
+              type: string
+              minLength: 1
+            details:
+              type: array
+              items:
+                $ref: '#/components/schemas/ErrorDetail'
+              description: Всегда присутствует; может быть пустым.
+            request_id:
+              type: string
+              format: uuid
+              description: ID запроса для диагностики. При replay сохраняется ID исходного ответа.
+          required:
+          - code
+          - message
+          - details
+          - request_id
+      required:
+      - error
+    BookListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Book'
+          maxItems: 100
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+      required:
+      - data
+      - pagination
+      examples:
+      - data:
+        - *id004
+        pagination:
+          limit: 20
+          offset: 0
+          total: 1
+          has_more: false
+    ReaderListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reader'
+          maxItems: 100
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+      required:
+      - data
+      - pagination
+      examples:
+      - data:
+        - *id005
+        pagination:
+          limit: 20
+          offset: 0
+          total: 1
+          has_more: false
+    LoanListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Loan'
+          maxItems: 100
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+      required:
+      - data
+      - pagination
+      examples:
+      - data:
+        - *id006
+        pagination:
+          limit: 20
+          offset: 0
+          total: 1
+          has_more: false
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: UUID ресурса. Некорректный синтаксис — 400, отсутствующий ресурс — 404.
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      description: Размер страницы, по умолчанию 20; от 1 до 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      description: Количество пропущенных записей после фильтрации и сортировки.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 1000000
+        default: 0
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Обязательный UUID, без кавычек, уникальный для логического создания выдачи. Точная политика scope,
+        fingerprint, replay, concurrency и TTL описана в POST /loans.
+      schema:
+        type: string
+        format: uuid
+      example: 55555555-5555-4555-8555-555555555555
+  headers:
+    RequestId:
+      description: ID обработки запроса. При replay воспроизводится исходное значение.
+      schema:
+        type: string
+        format: uuid
+    Location:
+      description: Относительный URI созданного ресурса с префиксом /v1/.
+      schema:
+        type: string
+        format: uri-reference
+    RetryAfter:
+      description: Только для issue=idempotency_in_progress; 1 секунда до следующей попытки. Не задаёт максимальное
+        время выполнения исходного запроса.
+      schema:
+        type: integer
+        minimum: 1
+      example: 1
+  responses:
+    InvalidRequest:
+      description: Некорректный JSON, повторяющиеся JSON-ключи, неверные/неизвестные query-параметры, некорректный
+        UUID пути или отсутствующий/некорректный Idempotency-Key. Код INVALID_REQUEST.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            InvalidRequest:
+              $ref: '#/components/examples/InvalidRequest'
+    NotFound:
+      description: 'Ресурс не существует или логически удалён. При создании выдачи также: книга или читатель не
+        найдены. Код NOT_FOUND.'
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            NotFound:
+              $ref: '#/components/examples/NotFound'
+    ValidationError:
+      description: Валидный JSON нарушает схему запроса или ограничения значений; неизвестные поля, неверная контрольная
+        сумма ISBN и due_date не в будущем. Код VALIDATION_ERROR.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            ValidationError:
+              $ref: '#/components/examples/ValidationError'
+            UnknownField:
+              $ref: '#/components/examples/UnknownField'
+            InvalidDueDate:
+              $ref: '#/components/examples/InvalidDueDate'
+            InvalidIsbn:
+              $ref: '#/components/examples/InvalidIsbn'
+    Conflict:
+      description: Конфликт уникальности, состояния или идемпотентности. CONFLICT — дубликат ISBN/email либо конкурентный
+        повтор в обработке; BUSINESS_RULE_VIOLATION — недоступный экземпляр, лимит пяти выдач, активные выдачи при
+        удалении, уменьшение фонда ниже числа выдач; IDEMPOTENCY_MISMATCH — другое тело с тем же ключом. Конкретные
+        применимые причины описаны у операции.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            DuplicateIsbn:
+              $ref: '#/components/examples/DuplicateIsbn'
+            DuplicateEmail:
+              $ref: '#/components/examples/DuplicateEmail'
+            NoCopies:
+              $ref: '#/components/examples/NoCopies'
+            LoanLimit:
+              $ref: '#/components/examples/LoanLimit'
+            ActiveLoans:
+              $ref: '#/components/examples/ActiveLoans'
+            CopiesBelowActive:
+              $ref: '#/components/examples/CopiesBelowActive'
+            IdempotencyMismatch:
+              $ref: '#/components/examples/IdempotencyMismatch'
+            IdempotencyInProgress:
+              $ref: '#/components/examples/IdempotencyInProgress'
+    UnsupportedMediaType:
+      description: 'Тело запроса должно иметь Content-Type: application/json. Код INVALID_REQUEST.'
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  examples:
+    InvalidRequest:
+      summary: Некорректный параметр сортировки
+      value:
+        error:
+          code: INVALID_REQUEST
+          message: Недопустимое значение sort.
+          details:
+          - field: sort
+            issue: invalid_sort
+            message: Недопустимое значение sort.
+          request_id: 44444444-4444-4444-8444-444444444444
+    NotFound:
+      summary: Ресурс не найден
+      value:
+        error:
+          code: NOT_FOUND
+          message: Книга не найдена.
+          details:
+          - field: book_id
+            issue: not_found
+            message: Книга не найдена.
+          request_id: 44444444-4444-4444-8444-444444444444
+    InvalidDueDate:
+      summary: Дата новой выдачи не в будущем
+      value:
+        error:
+          code: VALIDATION_ERROR
+          message: due_date должна быть позже текущей даты UTC.
+          details:
+          - field: due_date
+            issue: future_date_required
+            message: due_date должна быть позже текущей даты UTC.
+          request_id: 44444444-4444-4444-8444-444444444444
+    UnknownField:
+      summary: Серверное поле передано клиентом
+      value:
+        error:
+          code: VALIDATION_ERROR
+          message: Поле available_copies запрещено в запросе.
+          details:
+          - field: available_copies
+            issue: additional_property
+            message: Поле available_copies запрещено в запросе.
+          request_id: 44444444-4444-4444-8444-444444444444
+    InvalidIsbn:
+      summary: Ошибка контрольной суммы ISBN-13
+      value:
+        error:
+          code: VALIDATION_ERROR
+          message: Неверная контрольная сумма ISBN-13.
+          details:
+          - field: isbn
+            issue: invalid_checksum
+            message: Неверная контрольная сумма ISBN-13.
+          request_id: 44444444-4444-4444-8444-444444444444
+    ValidationError:
+      summary: Пустое название
+      value:
+        error:
+          code: VALIDATION_ERROR
+          message: Название не может быть пустым.
+          details:
+          - field: title
+            issue: min_length
+            message: Название не может быть пустым.
+          request_id: 44444444-4444-4444-8444-444444444444
+    NoCopies:
+      summary: Все экземпляры выданы
+      value:
+        error:
+          code: BUSINESS_RULE_VIOLATION
+          message: Нет доступных экземпляров.
+          details:
+          - field: book_id
+            issue: no_available_copies
+            message: Нет доступных экземпляров.
+          request_id: 44444444-4444-4444-8444-444444444444
+    LoanLimit:
+      summary: У читателя уже пять активных выдач
+      value:
+        error:
+          code: BUSINESS_RULE_VIOLATION
+          message: Допускается не более пяти активных выдач.
+          details:
+          - field: reader_id
+            issue: active_loans_limit
+            message: Допускается не более пяти активных выдач.
+          request_id: 44444444-4444-4444-8444-444444444444
+    ActiveLoans:
+      summary: Удаление заблокировано активными выдачами
+      value:
+        error:
+          code: BUSINESS_RULE_VIOLATION
+          message: Нельзя удалить ресурс с активными выдачами.
+          details:
+          - field: null
+            issue: active_loans_exist
+            message: Нельзя удалить ресурс с активными выдачами.
+          request_id: 44444444-4444-4444-8444-444444444444
+    CopiesBelowActive:
+      summary: Нельзя уменьшить фонд ниже числа выдач
+      value:
+        error:
+          code: BUSINESS_RULE_VIOLATION
+          message: total_copies меньше числа активных выдач.
+          details:
+          - field: total_copies
+            issue: copies_below_active_loans
+            message: total_copies меньше числа активных выдач.
+          request_id: 44444444-4444-4444-8444-444444444444
+    DuplicateIsbn:
+      summary: ISBN уже используется
+      value:
+        error:
+          code: CONFLICT
+          message: Книга с таким ISBN уже существует.
+          details:
+          - field: isbn
+            issue: duplicate_isbn
+            message: Книга с таким ISBN уже существует.
+          request_id: 44444444-4444-4444-8444-444444444444
+    DuplicateEmail:
+      summary: Email уже используется
+      value:
+        error:
+          code: CONFLICT
+          message: Читатель с таким email уже существует.
+          details:
+          - field: email
+            issue: duplicate_email
+            message: Читатель с таким email уже существует.
+          request_id: 44444444-4444-4444-8444-444444444444
+    IdempotencyMismatch:
+      summary: Ключ повторно использован с другим телом
+      value:
+        error:
+          code: IDEMPOTENCY_MISMATCH
+          message: Этот Idempotency-Key уже связан с другим телом запроса.
+          details:
+          - field: Idempotency-Key
+            issue: payload_mismatch
+            message: Этот Idempotency-Key уже связан с другим телом запроса.
+          request_id: 44444444-4444-4444-8444-444444444444
+    IdempotencyInProgress:
+      summary: Первый запрос с ключом ещё обрабатывается
+      value:
+        error:
+          code: CONFLICT
+          message: Запрос с этим ключом ещё выполняется. Повторите позже.
+          details:
+          - field: Idempotency-Key
+            issue: idempotency_in_progress
+            message: Запрос с этим ключом ещё выполняется. Повторите позже.
+          request_id: 44444444-4444-4444-8444-444444444444
+    BookCreated:
+      summary: Созданная книга
+      value: *id004
+    ReaderCreated:
+      summary: Созданный читатель
+      value: *id005
+    LoanCreated:
+      summary: Новая активная выдача
+      value: *id006
+    LoanReturned:
+      summary: Выдача после возврата
+      value: *id007
